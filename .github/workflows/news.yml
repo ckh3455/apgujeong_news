@@ -13,10 +13,12 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    # 레포 Variables로 관리하는 것을 권장 (Settings → Secrets and variables → Actions → Variables)
+
+    # ⬇️ 레포 Variables 또는 하드코딩 중 택1
     env:
-      SPREADSHEET_ID: ${{ vars.SPREADSHEET_ID }}   # 1QP56lm5kPBdsUhrgcgY2U-JdmukXIkKCSxefd1QExKE
-      SHEET_NAME:     ${{ vars.SHEET_NAME }}       # 압구정_뉴스
+      SPREADSHEET_ID: ${{ vars.SPREADSHEET_ID }}   # 예: 1QP56lm5kPBdsUhrgcgY2U-JdmukXIkKCSxefd1QExKE
+      SHEET_NAME:     ${{ vars.SHEET_NAME }}       # 예: 압구정_뉴스
+
     steps:
       - uses: actions/checkout@v4
 
@@ -29,12 +31,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install feedparser gspread google-auth
 
-      # ✅ b64 없이: Secret에 저장한 서비스계정 JSON 원문을 파일에 씁니다.
+      # ✅ Secret에 저장된 서비스계정 JSON "원문"을 파일로 저장
       - name: Write service account JSON
         run: |
           cat > service_account.json <<'JSON'
           ${{ secrets.SERVICE_ACCOUNT_JSON }}
           JSON
+
+      # (선택) 설정 값 확인용 — 민감정보 아님
+      - name: Print env
+        run: echo "ID=${SPREADSHEET_ID}  SHEET=${SHEET_NAME}"
 
       - name: Run collector
         run: python news.py
