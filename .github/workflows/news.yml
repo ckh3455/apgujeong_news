@@ -1,0 +1,44 @@
+name: news-to-sheets
+
+on:
+  schedule:
+    # GitHub Actions는 UTC 기준이므로 KST(UTC+9) 10/12/14/16/18시는 UTC 01/03/05/07/09
+    - cron: "0 1,3,5,7,9 * * *"
+  workflow_dispatch: {}   # 수동 실행 버튼
+
+concurrency:
+  group: news-to-sheets
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    env:
+      SERVICE_ACCOUNT_JSON_B64: ${{ secrets.SERVICE_ACCOUNT_JSON_B64 }}
+      SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}         # 1QP56l...QExKE
+      SHEET_NAME: ${{ secrets.SHEET_NAME }}                 # 압구정_뉴스
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install feedparser gspread google-auth
+
+      - name: Prepare service account file
+        run: |
+          if [ -z "${SERVICE_ACCOUNT_JSON_B64:-}" ]; then
+            echo "::error::Missing secret SERVICE_ACCOUNT_JSON_B64"; exit 1;
+          fi
+          echo "$SERVICE_ACCOUNT_JSON_B64" | base64 -d > service_account.json 2>/dev/null \
+            || { echo "::error::base64 decode failed"; exit 1; }
+          # 초간단 검증
+          grep -q "client_email" service_account.json || { echo "::error::invalid service_account.json"; exit 1; }
+
+      - name: Run collector
+        run: |
+          python news.py
