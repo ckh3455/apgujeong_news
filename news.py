@@ -1,21 +1,23 @@
 # -*- coding: utf-8 -*-
 """
 원부동산 매물장 / '압구정_뉴스' 탭에 적재:
-[일시, 뉴스제목, 요약, 출처, 키워드]
+[일시, 뉴스제목, 요약, 출처(=HYPERLINK), 키워드]
 
 - 소스:
   * Google News 검색 RSS (키워드별)
   * Google News + site:news.naver.com / site:news.daum.net 필터
   * 매일경제(부동산) 공식 RSS
   * 한국경제(부동산) 공식 RSS
-- 중복 방지: 최근 1000개 '뉴스제목' + 링크 기준
+- 중복 방지: 최근 N개 '뉴스제목' + '링크(URL)' 기준
+  (출처가 HYPERLINK 공식이어도 URL을 파싱해 중복 제거)
 - 일시: KST(Asia/Seoul)로 YYYY-MM-DD HH:MM
+- 정렬: A열(일시) 오름차순
 """
 
 import os, re
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlparse
 
 import feedparser
 import gspread
@@ -33,11 +35,13 @@ KEYWORDS = [
     "가계부채","기준금리","전세대출","주담대","규제지역"
 ]
 
+DEDUP_LIMIT = 2000  # 최근 N개만 중복 검사 (제목/링크)
+
 def rss_urls():
     urls = []
+    gnews_base = "https://news.google.com/rss/search?q={q}&hl=ko&gl=KR&ceid=KR:ko"
 
     # ① Google News (키워드별)
-    gnews_base = "https://news.google.com/rss/search?q={q}&hl=ko&gl=KR&ceid=KR:ko"
     for k in KEYWORDS:
         urls.append((f"GoogleNews:{k}", gnews_base.format(q=quote_plus(k))))
 
@@ -71,22 +75,46 @@ def auth_sheet():
     cur = ws.get_values("A1:E1")
     if not cur or cur[0] != HEADERS:
         ws.update("A1:E1", [HEADERS])
+    # 헤더 고정
+    try:
+        ws.freeze(rows=1)
+    except Exception:
+        pass
     return ws
 
-def get_existing_titles(ws, limit=1000):
+def parse_hyperlink_formula(cell: str) -> str:
     """
-    gspread Worksheet에는 last_row가 없습니다.
-    2열(뉴스제목) 전체를 읽어 뒤쪽 limit개만 사용해 중복 방지합니다.
+    =HYPERLINK("URL","TEXT") 형태에서 URL만 추출.
+    공식이 아닌 경우(cell이 그냥 URL 등)에는 원문 반환.
     """
+    if not cell:
+        return ""
+    m = re.search(r'HYPERLINK\("([^"]+)"', cell, flags=re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    return cell.strip()
+
+def get_existing_sets(ws, limit=DEDUP_LIMIT):
+    """제목/링크 최근 limit개 추출 (링크는 HYPERLINK 공식일 수도 있어 URL 파싱)"""
     try:
-        titles = ws.col_values(2)  # B열 전체 (헤더 포함)
+        titles = ws.col_values(2)[1:]  # B열(뉴스제목), 헤더 제외
     except Exception:
-        return set()
-    # 헤더 제거 후 뒤에서 limit개만
-    titles = [t.strip() for t in titles[1:] if t]  # 0번은 헤더 '뉴스제목'
-    if not titles:
-        return set()
-    return set(titles[-limit:])
+        titles = []
+    # D열(출처) — 공식 그대로 가져오기 위해 FORMULA 모드로 읽기
+    try:
+        formulas = ws.get('D2:D', value_render_option='FORMULA')
+        # ws.get(...)는 [[cell],[cell],...] 형태
+        links = [parse_hyperlink_formula(r[0]) for r in formulas if r and r[0]]
+    except Exception:
+        # 대안: 일반 값으로 읽기
+        try:
+            links = ws.col_values(4)[1:]
+        except Exception:
+            links = []
+
+    titles = [t.strip() for t in titles if t][-limit:]
+    links  = [l.strip() for l in links  if l][-limit:]
+    return set(titles), set(links)
 
 def strip_html(s: str) -> str:
     if not s:
@@ -104,14 +132,28 @@ def to_kst(entry) -> str:
         dt = datetime.now(kst)
     return dt.strftime("%Y-%m-%d %H:%M")
 
+def make_hyperlink(url: str) -> str:
+    """=HYPERLINK("url","도메인") 형태 문자열 생성"""
+    if not url:
+        return ""
+    try:
+        netloc = urlparse(url).netloc or url
+        netloc = netloc.replace("www.", "")
+    except Exception:
+        netloc = "링크"
+    # URL에 "가 들어갈 가능성은 거의 없지만, 방어적으로 이스케이프
+    safe_url = url.replace('"', '%22')
+    safe_text = netloc.replace('"', "'")
+    return f'=HYPERLINK("{safe_url}","{safe_text}")'
+
 def collect():
     if not SPREADSHEET_ID:
         raise RuntimeError("SPREADSHEET_ID env missing")
 
     ws = auth_sheet()
-    existing_titles = get_existing_titles(ws)
+    existing_titles, existing_links = get_existing_sets(ws)
 
-    rows, seen_links = [], set()  # [일시, 뉴스제목, 요약, 출처, 키워드]
+    rows, seen_links = [], set()  # [일시, 뉴스제목, 요약, 출처(하이퍼링크), 키워드]
 
     for tag, url in rss_urls():
         feed = feedparser.parse(url)
@@ -120,20 +162,28 @@ def collect():
             link  = (getattr(e, "link", "")  or "").strip()
             if not title:
                 continue
-            # 최근 제목/링크 기준 중복 방지
-            if title in existing_titles or (link and link in seen_links):
+            # 제목/링크 기준 중복 제거 (시트에 있거나 이번 실행에서 이미 본 링크)
+            if title in existing_titles or (link and (link in existing_links or link in seen_links)):
                 continue
 
             summary = strip_html(getattr(e, "summary", ""))
             ts_kst  = to_kst(e)
-            rows.append([ts_kst, title, summary, link, tag])
+            rows.append([ts_kst, title, summary, make_hyperlink(link), tag])
 
             existing_titles.add(title)
             if link:
+                existing_links.add(link)
                 seen_links.add(link)
 
     if rows:
-        ws.append_rows(rows, value_input_option="RAW")
+        # 하이퍼링크 공식 평가를 위해 USER_ENTERED 사용
+        ws.append_rows(rows, value_input_option="USER_ENTERED")
+        # 일자 기준 오름차순 정렬
+        try:
+            ws.sort((1, 'asc'))
+        except Exception:
+            pass
+
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] inserted={len(rows)}")
 
 if __name__ == "__main__":
