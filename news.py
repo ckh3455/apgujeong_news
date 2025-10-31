@@ -1,33 +1,32 @@
 # -*- coding: utf-8 -*-
 """
-원부동산 매물장 / '압구정_뉴스' 탭에 다음 형식으로 적재:
+원부동산 매물장 / '압구정_뉴스' 탭에 적재:
 [일시, 뉴스제목, 요약, 출처, 키워드]
 
-- 뉴스 포털/매체:
+- 소스:
   * Google News 검색 RSS (키워드별)
   * Google News + site:news.naver.com / site:news.daum.net 필터
   * 매일경제(부동산) 공식 RSS
   * 한국경제(부동산) 공식 RSS
-- 중복 방지: 최근 1000개 제목 + 링크 기준
-- 일시: KST로 변환 (YYYY-MM-DD HH:MM)
+- 중복 방지: 최근 1000개 '뉴스제목' + 링크 기준
+- 일시: KST(Asia/Seoul)로 YYYY-MM-DD HH:MM
 """
 
 import os, re
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from urllib.parse import quote_plus
+
 import feedparser
 import gspread
 from google.oauth2.service_account import Credentials
 
-SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")            # 원부동산 매물장 (ID)
-SHEET_NAME     = os.getenv("SHEET_NAME", "압구정_뉴스")   # 탭명
+SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")            # 스프레드시트 ID
+SHEET_NAME     = os.getenv("SHEET_NAME", "압구정_뉴스")   # 탭 이름
 SA_PATH        = "service_account.json"
 
-# 시트 헤더
 HEADERS = ["일시", "뉴스제목", "요약", "출처", "키워드"]
 
-# 키워드 (요청하신 목록)
 KEYWORDS = [
     "압구정","부동산","재건축","부동산 세금","보유세",
     "부동산정책","부동산규제","대출규제","대출정책",
@@ -35,10 +34,6 @@ KEYWORDS = [
 ]
 
 def rss_urls():
-    """
-    수집 대상 RSS URL과 태그를 (tag, url)의 리스트로 반환.
-    - tag는 시트 '키워드' 열에 기록됩니다.
-    """
     urls = []
 
     # ① Google News (키워드별)
@@ -46,7 +41,7 @@ def rss_urls():
     for k in KEYWORDS:
         urls.append((f"GoogleNews:{k}", gnews_base.format(q=quote_plus(k))))
 
-    # ② Google News (네이버/다음 도메인으로 제한)
+    # ② Google News (네이버/다음 도메인 제한)
     site_queries = [
         ("NaverNews", "site:news.naver.com (압구정 OR 재건축 OR 부동산 OR 규제 OR 주담대)"),
         ("DaumNews",  "site:news.daum.net  (압구정 OR 재건축 OR 부동산 OR 규제 OR 주담대)"),
@@ -79,12 +74,19 @@ def auth_sheet():
     return ws
 
 def get_existing_titles(ws, limit=1000):
-    last = ws.last_row
-    if last < 2:
+    """
+    gspread Worksheet에는 last_row가 없습니다.
+    2열(뉴스제목) 전체를 읽어 뒤쪽 limit개만 사용해 중복 방지합니다.
+    """
+    try:
+        titles = ws.col_values(2)  # B열 전체 (헤더 포함)
+    except Exception:
         return set()
-    start = max(2, last - limit + 1)
-    vals = ws.get_values(f"B{start}:B{last}")  # 2열=뉴스제목
-    return {v[0].strip() for v in vals if v and v[0]}
+    # 헤더 제거 후 뒤에서 limit개만
+    titles = [t.strip() for t in titles[1:] if t]  # 0번은 헤더 '뉴스제목'
+    if not titles:
+        return set()
+    return set(titles[-limit:])
 
 def strip_html(s: str) -> str:
     if not s:
@@ -92,7 +94,6 @@ def strip_html(s: str) -> str:
     return re.sub(r"<[^>]+>", "", s).strip()
 
 def to_kst(entry) -> str:
-    """feedparser entry.published_parsed(UTC 추정)를 KST로."""
     kst = ZoneInfo("Asia/Seoul")
     try:
         if getattr(entry, "published_parsed", None):
@@ -111,6 +112,7 @@ def collect():
     existing_titles = get_existing_titles(ws)
 
     rows, seen_links = [], set()  # [일시, 뉴스제목, 요약, 출처, 키워드]
+
     for tag, url in rss_urls():
         feed = feedparser.parse(url)
         for e in feed.entries:
