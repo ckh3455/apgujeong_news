@@ -7,14 +7,13 @@
 - 중복 방지: 최근 N개 제목+링크 기준
 - 일시: KST(YYYY-MM-DD HH:MM)
 - 정렬: A열(일시) 오름차순
-- 서식: 헤더 고정, C열(출처) 배경 흰색, D열 이후 컬럼 삭제
+- 서식: 헤더 고정, C열(출처) 배경 흰색, D열 이후 제거
 """
 
 import os
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from urllib.parse import quote_plus
-import re
 
 import feedparser
 import gspread
@@ -24,10 +23,9 @@ SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 SHEET_NAME     = os.getenv("SHEET_NAME", "압구정_뉴스")
 SA_PATH        = "service_account.json"
 
-HEADERS = ["일시", "뉴스제목", "출처"]          # ✅ 3개만
+HEADERS = ["일시", "뉴스제목", "출처"]   # ✅ 3개만
 DEDUP_LIMIT = 2000
 
-# 수집 키워드(시트에는 기록하지 않음)
 KEYWORDS = [
     "압구정","부동산","재건축","부동산 세금","보유세",
     "부동산정책","부동산규제","대출규제","대출정책",
@@ -40,14 +38,14 @@ def rss_urls():
     # ① 키워드별
     for k in KEYWORDS:
         urls.append(("GoogleNews", gnews.format(q=quote_plus(k))))
-    # ② 네이버/다음만
+    # ② 네이버/다음 도메인 한정 쿼리
     site_queries = [
         "site:news.naver.com (압구정 OR 재건축 OR 부동산 OR 규제 OR 주담대)",
         "site:news.daum.net  (압구정 OR 재건축 OR 부동산 OR 규제 OR 주담대)",
     ]
     for q in site_queries:
         urls.append(("GoogleNews", gnews.format(q=quote_plus(q))))
-    # ③ 매경/한경 부동산 RSS
+    # ③ 매경/한경 부동산 공식 RSS
     urls += [
         ("매일경제 부동산", "https://www.mk.co.kr/rss/50300009/"),
         ("한국경제 부동산", "https://www.hankyung.com/feed/realestate"),
@@ -68,7 +66,7 @@ def auth_sheet():
     return ws
 
 def normalize_sheet(ws):
-    """헤더/고정, C열 흰색, D열 이후 삭제(있으면)."""
+    """헤더/고정, C열 흰색, D열 이후 제거(있으면)."""
     # 헤더 강제
     cur = ws.get_values("A1:C1")
     if not cur or (cur and cur[0] != HEADERS):
@@ -78,26 +76,26 @@ def normalize_sheet(ws):
         ws.freeze(rows=1)
     except Exception:
         pass
-    # C열 배경 흰색 (색상 넣지 말기)
+    # C열 배경 흰색
     try:
         ws.format("C:C", {"backgroundColor": {"red": 1, "green": 1, "blue": 1}})
     except Exception:
         pass
-    # D열 이후 있으면 삭제
+    # D열 이후 제거 → 가장 호환성 좋은 방법: 열 개수 3으로 리사이즈
     try:
-        if ws.col_count > 3:
-            ws.delete_columns(4, ws.col_count - 3)
+        if ws.col_count != 3:
+            ws.resize(rows=ws.row_count, cols=3)
     except Exception:
         pass
 
 def get_existing_sets(ws, limit=DEDUP_LIMIT):
     """제목/링크 최근 limit개 추출(헤더 제외)."""
     try:
-        titles = ws.col_values(2)[1:]
+        titles = ws.col_values(2)[1:]  # B열
     except Exception:
         titles = []
     try:
-        links = ws.col_values(3)[1:]
+        links = ws.col_values(3)[1:]   # C열
     except Exception:
         links = []
     titles = [t.strip() for t in titles if t][-limit:]
@@ -139,4 +137,14 @@ def collect():
                 existing_links.add(link); seen_links.add(link)
 
     if rows:
-        ws.append_rows(rows, value_input_option="RA_
+        ws.append_rows(rows, value_input_option="RAW")  # ← 여기 철자 고쳤습니다
+        try:
+            ws.sort((1, "asc"))  # A열(일시) 오름차순
+        except Exception:
+            pass
+        normalize_sheet(ws)
+
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] inserted={len(rows)}")
+
+if __name__ == "__main__":
+    collect()
