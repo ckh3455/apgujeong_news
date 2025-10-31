@@ -6,9 +6,8 @@ from urllib.parse import quote_plus
 import feedparser, gspread
 from google.oauth2.service_account import Credentials
 
-SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
-SHEET_NAME = os.getenv("SHEET_NAME", "압구정_뉴스")
-SA_PATH = "service_account.json"
+SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")          # 원부동산 매물장 (ID)
+SHEET_NAME     = os.getenv("SHEET_NAME", "압구정_뉴스") # 탭명
 
 HEADERS = ["일시","뉴스제목","요약","출처","키워드"]
 KEYWORDS = [
@@ -23,13 +22,16 @@ def rss_urls():
 
 def auth_sheet():
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-    creds = Credentials.from_service_account_file(SA_PATH, scopes=scopes)
+    creds = Credentials.from_service_account_file("service_account.json", scopes=scopes)
     gc = gspread.authorize(creds)
-    sh = gc.open_by_key(SPREADSHEET_ID)
-    try: ws = sh.worksheet(SHEET_NAME)
+    sh = gc.open_by_key(SPREADSHEET_ID)  # 스프레드시트 제목이 '원부동산 매물장'이어도 ID로 여는 게 안전
+    try:
+        ws = sh.worksheet(SHEET_NAME)
     except gspread.exceptions.WorksheetNotFound:
         ws = sh.add_worksheet(title=SHEET_NAME, rows=2000, cols=10)
-    if ws.get_values("A1:E1") != [HEADERS]:
+    # 헤더 보정
+    cur = ws.get_values("A1:E1")
+    if not cur or cur[0] != HEADERS:
         ws.update("A1:E1", [HEADERS])
     return ws
 
@@ -37,7 +39,7 @@ def get_existing_titles(ws, limit=1000):
     last = ws.last_row
     if last < 2: return set()
     start = max(2, last - limit + 1)
-    vals = ws.get_values(f"B{start}:B{last}")
+    vals = ws.get_values(f"B{start}:B{last}")  # 2열=뉴스제목
     return {v[0].strip() for v in vals if v and v[0]}
 
 def strip_html(s): return re.sub(r"<[^>]+>", "", s or "").strip()
@@ -47,8 +49,10 @@ def to_kst(entry):
     try:
         if getattr(entry, "published_parsed", None):
             dt = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc).astimezone(kst)
-        else: dt = datetime.now(kst)
-    except Exception: dt = datetime.now(kst)
+        else:
+            dt = datetime.now(kst)
+    except Exception:
+        dt = datetime.now(kst)
     return dt.strftime("%Y-%m-%d %H:%M")
 
 def collect():
@@ -59,12 +63,17 @@ def collect():
         feed = feedparser.parse(url)
         for e in feed.entries:
             title = getattr(e, "title", "").strip()
-            link = getattr(e, "link", "").strip()
-            if not title or title in existing or link in seen: continue
+            link  = getattr(e, "link", "").strip()
+            if not title or title in existing or link in seen:
+                continue
             summary = strip_html(getattr(e, "summary", ""))
             rows.append([to_kst(e), title, summary, link, kw])
             existing.add(title); seen.add(link)
-    if rows: ws.append_rows(rows, value_input_option="RAW")
+    if rows:
+        ws.append_rows(rows, value_input_option="RAW")
     print(f"inserted={len(rows)}")
 
-if __name__ == "__main__": collect()
+if __name__ == "__main__":
+    if not SPREADSHEET_ID:
+        raise RuntimeError("SPREADSHEET_ID env missing")
+    collect()
