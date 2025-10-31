@@ -13,11 +13,9 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-
-    # ⬇️ 레포 Variables 또는 하드코딩 중 택1
     env:
-      SPREADSHEET_ID: ${{ vars.SPREADSHEET_ID }}   # 예: 1QP56lm5kPBdsUhrgcgY2U-JdmukXIkKCSxefd1QExKE
-      SHEET_NAME:     ${{ vars.SHEET_NAME }}       # 예: 압구정_뉴스
+      SPREADSHEET_ID: "1QP56lm5kPBdsUhrgcgY2U-JdmukXIkKCSxefd1QExKE"
+      SHEET_NAME: "압구정_뉴스"
 
     steps:
       - uses: actions/checkout@v4
